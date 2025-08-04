@@ -1,29 +1,7 @@
-############################################################################
-#
 # Copyright (C) 2016 The Qt Company Ltd.
-# Contact: https://www.qt.io/licensing/
-#
-# This file is part of Qt Creator.
-#
-# Commercial License Usage
-# Licensees holding valid commercial Qt licenses may use this file in
-# accordance with the commercial license agreement provided with the
-# Software or, alternatively, in accordance with the terms contained in
-# a written agreement between you and The Qt Company. For licensing terms
-# and conditions see https://www.qt.io/terms-conditions. For further
-# information use the contact form at https://www.qt.io/contact-us.
-#
-# GNU General Public License Usage
-# Alternatively, this file may be used under the terms of the GNU
-# General Public License version 3 as published by the Free Software
-# Foundation with exceptions as appearing in the file LICENSE.GPL3-EXCEPT
-# included in the packaging of this file. Please review the following
-# information to ensure the GNU General Public License requirements will
-# be met: https://www.gnu.org/licenses/gpl-3.0.html.
-#
-############################################################################
+# SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only WITH Qt-GPL-exception-1.0
 
-from dumper import Children, SubItem
+from dumper import Children, SubItem, DumperBase
 from utils import TypeCode, DisplayFormat
 import re
 
@@ -608,3 +586,35 @@ def qdump__QtcDumperTest_String(d, value):
         second = d.hexdecode(d.putSubItem('second', value['second']).value)
         third = d.hexdecode(d.putSubItem('third', value['third']).value)[:-1]
     d.putValue(first + ', ' + second + ', ' + third)
+
+
+def qdump__tl__expected(d: DumperBase, value: DumperBase.Value):
+    # There are issues with correct type handling for enums and pointer in CDB
+    # preventing type cast from working as expected in these cases
+
+    has_value = False
+    val = {}
+
+    try:
+        has_value = value["m_has_val"].integer() != 0
+        val = value["m_val"] if has_value else value["m_unexpect"]["m_val"]
+    except:
+        okType = value.type[0]
+        errType = value.type[1]
+
+        # Result and error (and a initialized flag) are packed into a union storage
+        largerType = max(okType, errType, key=lambda t: t.size())
+        storage, has_value = value.split('{{{}}}b'.format(largerType.name))
+        val = storage.cast(okType.name) if has_value else storage.cast(errType.name)
+
+    if has_value:
+        if val.type.name != 'void':
+            d.putExpandable()
+        d.putValue('Expected')
+    else:
+        d.putExpandable()
+        d.putValue('Unexpected')
+
+    if d.isExpanded():
+        with Children(d):
+            d.putSubItem('inner', val)

@@ -1,27 +1,5 @@
-############################################################################
-#
 # Copyright (C) 2016 The Qt Company Ltd.
-# Contact: https://www.qt.io/licensing/
-#
-# This file is part of Qt Creator.
-#
-# Commercial License Usage
-# Licensees holding valid commercial Qt licenses may use this file in
-# accordance with the commercial license agreement provided with the
-# Software or, alternatively, in accordance with the terms contained in
-# a written agreement between you and The Qt Company. For licensing terms
-# and conditions see https://www.qt.io/terms-conditions. For further
-# information use the contact form at https://www.qt.io/contact-us.
-#
-# GNU General Public License Usage
-# Alternatively, this file may be used under the terms of the GNU
-# General Public License version 3 as published by the Free Software
-# Foundation with exceptions as appearing in the file LICENSE.GPL3-EXCEPT
-# included in the packaging of this file. Please review the following
-# information to ensure the GNU General Public License requirements will
-# be met: https://www.gnu.org/licenses/gpl-3.0.html.
-#
-############################################################################
+# SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only WITH Qt-GPL-exception-1.0
 
 from dumper import Children
 
@@ -34,7 +12,7 @@ def typeTarget(type):
 
 
 def stripTypeName(value):
-    return typeTarget(value.type).unqualified().name
+    return typeTarget(value.type).name
 
 
 def extractPointerType(d, value):
@@ -75,7 +53,7 @@ def readTemplateName(d, value):
 def readLiteral(d, value):
     if not value.integer():
         return "<null>"
-    type = typeTarget(value.type.unqualified())
+    type = typeTarget(value.type)
     if type and (type.name == "CPlusPlus::TemplateNameId"):
         return readTemplateName(d, value)
     elif type and (type.name == "CPlusPlus::QualifiedNameId"):
@@ -101,6 +79,11 @@ def qdump__Utils__Id(d, value):
     else:
         d.putValue(val)
     d.putPlainChildren(value)
+
+
+def qdump__Utils__Key(d, value):
+    d.putByteArrayValue(value["data"])
+    d.putBetterType(value.type)
 
 
 def qdump__Debugger__Internal__GdbMi(d, value):
@@ -162,7 +145,7 @@ def kindName(d, value):
     e = value.integer()
     if e:
         kindType = d.lookupType("CPlusPlus::Kind")
-        return kindType.typeData().enumDisplay(e, value.address(), '%d')[11:]
+        return kindType.tdata.enumDisplay(e, value.address(), '%d')[11:]
     else:
         return ''
 
@@ -219,28 +202,68 @@ def qdump__CPlusPlus__Internal__Value(d, value):
     d.putPlainChildren(value)
 
 
+def is_windows_drive_letter(ch):
+    return (ch >= ord('A') and ch <= ord('Z')) or (ch >= ord('a') and ch <= ord('z'))
+
+def is_relative_filepath_enc(path_enc):
+    # Note: path is hex-encoded UTF-16 here, i.e. 4 byte per original QChar
+    """
+    This needs to stay in sync with the implementation on the C++ side
+    in filepath.cpp.
+
+    bool isWindowsDriveLetter(QChar ch)
+    {
+       return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
+    }
+    bool startsWithWindowsDriveLetterAndSlash(QStringView path)
+    {
+       return path.size() > 2 && path[1] == ':' && path[2] == '/
+           && isWindowsDriveLetter(path[0]);
+    }
+    bool FilePath::isRelativePath() const
+    {
+        const QStringView p = pathView();
+        if (p.startsWith('/'))
+            return false;
+        if (startsWithWindowsDriveLetterAndSlash(p))
+            return false;
+        if (p.startsWith(u":/")) // QRC
+            return false;
+        return true;
+    }
+    """
+    colon = "3A00"
+    slash = "2F00"
+    if path_enc.startswith(slash):
+        return False
+    if path_enc[4:12] == colon + slash and is_windows_drive_letter(int(path_enc[0:2], 16)):
+        return False
+    if path_enc.startswith(colon + slash):
+        return False
+    return True
+
 def qdump__Utils__FilePath(d, value):
-    try:
-        # support FilePath before 4.15 as well
-        if not d.extractPointer(value["m_url"]):  # there is no valid URL
-            d.putStringValue(value["m_data"])
-        else:
-            d.putItem(value["m_url"])
-    except:
-        scheme, host, path = d.split("{@QString}{@QString}{@QString}", value)
-        scheme_enc = d.encodeString(scheme)
-        host_enc = d.encodeString(host)
-        elided, path_enc = d.encodeStringHelper(path, d.displayStringLimit)
-        val = ""
+    data, path_len, scheme_len, host_len = d.split("{@QString}IHH", value)
+    length, enc = d.encodeStringHelper(data, d.displayStringLimit)
+    # enc is concatenated  path + scheme + host
+    if scheme_len:
+        scheme_pos = path_len * 4
+        host_pos = scheme_pos + scheme_len * 4
+        path_enc = enc[0 : path_len * 4]
+        scheme_enc = enc[scheme_pos : scheme_pos + scheme_len * 4]
+        host_enc = enc[host_pos : host_pos + host_len * 4]
         slash = "2F00"
         dot = "2E00"
         colon = "3A00"
-        if len(scheme_enc):
-            val = scheme_enc + colon + slash + slash + host_enc
-            if not path_enc.startswith(slash):
-                val += slash + dot + slash
+        val = scheme_enc + colon + slash + slash + host_enc
+        if is_relative_filepath_enc(path_enc):
+            val += slash + dot + slash
+        elif is_windows_drive_letter(int(path_enc[0:2], 16)):
+            val += slash
         val += path_enc
-        d.putValue(val, "utf16", elided=elided)
+    else:
+        val = enc
+    d.putValue(val, "utf16", length=length)
     d.putPlainChildren(value)
 
 
@@ -259,36 +282,48 @@ def qdump__Utils__Port(d, value):
 
 
 
-def qdump__Utils__Environment(d, value):
+def x_qdump__Utils__Environment(d, value):
     qdump__Utils__NameValueDictionary(d, value)
 
 
-def qdump__Utils__NameValueDictionary(d, value):
-    dptr = d.extractPointer(value["m_values"])
-    (ref, n) = d.split('ii', dptr)
-    d.check(0 <= n and n <= 100 * 1000 * 1000)
-    d.check(-1 <= ref and ref < 100000)
+def qdump__Utils__DictKey(d, value):
+    d.putStringValue(value["name"])
 
-    d.putItemCount(n)
-    if d.isExpanded():
-        if n > 10000:
-            n = 10000
 
-        typeCode = 'ppp@{%s}@{%s}' % ("Utils::DictKey", "QString")
+def x_qdump__Utils__NameValueDictionary(d, value):
+    dptr = d.extractPointer(value)
+    if d.qtVersion() >= 0x60000:
+        if dptr == 0:
+            d.putItemCount(0)
+            return
+        m = value['d']['d']['m']
+        d.putItem(m)
+        d.putBetterType('Utils::NameValueDictionary')
+    else: # Qt5
+        (ref, n) = d.split('ii', dptr)
+        d.check(0 <= n and n <= 100 * 1000 * 1000)
+        d.check(-1 <= ref and ref < 100000)
 
-        def helper(node):
-            (p, left, right, padding1, key, padding2, value) = d.split(typeCode, node)
-            if left:
-                for res in helper(left):
-                    yield res
-            yield (key["name"], value)
-            if right:
-                for res in helper(right):
-                    yield res
+        d.putItemCount(n)
+        if d.isExpanded():
+            if n > 10000:
+                n = 10000
 
-        with Children(d, n):
-            for (pair, i) in zip(helper(dptr + 8), range(n)):
-                d.putPairItem(i, pair, 'key', 'value')
+            typeCode = 'ppp@{%s}@{%s}' % ("Utils::DictKey", "@QPair<@QString,bool>")
+
+            def helper(node):
+                (p, left, right, padding1, key, padding2, value) = d.split(typeCode, node)
+                if left:
+                    for res in helper(left):
+                        yield res
+                yield (key["name"], value)
+                if right:
+                    for res in helper(right):
+                        yield res
+
+            with Children(d, n):
+                for (pair, i) in zip(helper(dptr + 8), range(n)):
+                    d.putPairItem(i, pair, 'key', 'value')
 
 
 def qdump__Utf8String(d, value):
@@ -376,3 +411,15 @@ def qdump__QmakeProjectManager__QmakePriFileNode(d, value):
 
 def qdump__QmakeProjectManager__QmakeProFileNode(d, value):
     qdump__ProjectExplorer__FolderNode(d, value)
+
+
+def qdump__Utils__Result(d, value):
+    error, _pad, has_err = value.split('{QString}@b')
+    if has_err:
+        d.putExpandable()
+        d.putValue('Error')
+        if d.isExpanded():
+            with Children(d):
+                d.putSubItem('message', error)
+    else:
+        d.putValue('Ok')
